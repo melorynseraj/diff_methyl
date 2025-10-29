@@ -1,0 +1,179 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/cluster/tufts/kuperwasser01/mseraj01/methylseq-pipeline/output/methyldackel")
+```
+
+```{r Library}
+# install.packages("devtools")
+# devtools::install_github("al2na/methylKit")  # if not installed
+library(methylKit, quietly = T)
+library(tidyverse, quietly = T)
+library(GenomicFeatures)
+library(AnnotationHub)
+library(genomation)
+library(ensembldb)
+library(txdbmaker)
+library(BiocManager)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+```
+
+
+```{r CpG}
+# list your methylKit files (adjust paths)
+
+files_CpG <- list.files(pattern = "CpG", full.names = TRUE)
+files <- gsub("./", "", basename(files_CpG))
+
+
+# sample IDs and treatment vector: 0 = control, 1 = treated
+sample.ids <- gsub(".markdup.sorted_CpG.methylKit", "", basename(files_CpG))
+treatment <- ifelse(grepl("DMSO", sample.ids), 0, 1)
+
+
+myobj.list <- lapply(seq_along(files_CpG), function(i) {
+  methRead(
+    location   = files_CpG[i],
+    sample.id  = sample.ids[i],
+    assembly   = "hg38",
+    treatment  = treatment[i],
+    header     = TRUE,
+  )
+})
+
+
+myobj <- new("methylRawList", myobj.list)
+
+```
+
+```{r Coverage}
+# Remove low/high coverage outliers
+filtered <- filterByCoverage(myobj, lo.count=10, lo.perc=NULL, hi.count=NULL, hi.perc=99.9)
+
+# Optionally normalize coverage across samples
+normed <- normalizeCoverage(filtered)
+
+normed@treatment <- treatment
+
+```
+
+```{r Meth Prep}
+#meth <- methylKit::unite(normed,destrand = TRUE,)
+
+#saveRDS(meth, "meth.rds")
+
+meth <- readRDS("/cluster/tufts/kuperwasser01/mseraj01/methylseq-pipeline/output/methyldackel/meth.rds")
+```
+
+```{r Differentially Methylated Prep}
+main_chr <- c(as.character(1:22), "X", "Y", "MT")
+
+#myDiff <- calculateDiffMeth(meth, test = "F")
+#saveRDS(myDiff, "myDiff.rds")
+
+myDiff <- readRDS("../methyldackel/myDiff.rds") 
+
+myDiff <- myDiff[myDiff$chr %in% main_chr, ]
+
+# Get all differentially methylated CpGs (q < 0.01)
+diff_all <- getMethylDiff(myDiff, difference = 25, qvalue = 0.01)
+
+
+# Hypermethylated in treated
+diff_hyper <- getMethylDiff(myDiff, difference = 25, qvalue = 0.01, type = "hyper")
+
+# Hypomethylated in treated
+diff_hypo <- getMethylDiff(myDiff, difference = 25, qvalue = 0.01, type = "hypo")
+```
+
+
+```{r Differentially Methylated Analysis}
+#diff meth per chromosome
+diffMethPerChr(myDiff,plot=TRUE,qvalue.cutoff=0.01, meth.cutoff=25)
+
+```
+
+```{r Correlation and Clustering}
+#Correlation
+getCorrelation(meth,plot=TRUE)
+
+# Clustering dendrogram (1)
+d <- dist(t(percMethylation(meth)))
+hc <- hclust(d, method = "ward.D")
+plot(hc, labels = getSampleID(meth))
+
+#Clustering dendrogram (2)
+clusterSamples(
+  meth,
+  dist = "correlation",
+  method = "ward.D",
+  plot = TRUE
+)
+```
+
+```{r PCA - meth}
+PCASamples(meth, adj.lim = c(0.3, 0.1))
+```
+
+
+```{r}
+# Load prebuilt TxDb
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+
+# Create gene annotation object
+gene.obj <- genomation::readTranscriptFeatures(txdb)
+
+# Inspect
+gene.obj
+
+```
+
+
+
+```{r}
+meth_matrix <- percMethylation(meth)
+row_var <- apply(meth_matrix, 1, var)
+meth_top <- meth[row_var > quantile(row_var, 0.9), ]
+
+PCASamples(meth_top)
+```
+
+```{r}
+# methylation percentages
+meth_data <- percMethylation(meth)  # rows = CpGs, cols = samples
+
+# your treatment vector (0 = control, 1 = treated)
+treatment <- c(1, 1, 1, 1, 0)  # adjust to your dataset
+
+# mean methylation per group
+meth_ctrl  <- rowMeans(meth_data[, treatment == 0, drop=FALSE])
+meth_treat <- rowMeans(meth_data[, treatment == 1, drop=FALSE])
+
+# methylation difference
+meth_diff <- meth_treat - meth_ctrl
+
+# keep only variable CpGs for PCA
+vars <- apply(meth_data, 1, var)
+meth_var <- meth[vars > 0.01, ]
+
+# optional: subset by DMCs (difference > 25%)
+meth_top <- meth_var[abs(meth_diff[vars > 0.01]) > 25, ]
+
+# subsample for plotting
+set.seed(123)
+meth_sub <- meth_top[sample(1:nrow(meth_top), min(50000, nrow(meth_top))), ]
+
+# PCA plot
+PCASamples(meth_sub)
+
+
+```
+
+
+
+
+
